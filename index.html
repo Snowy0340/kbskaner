@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QR → EAN-13 · Сканер конвертации</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- QR-сканирование через камеру -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<!-- Генерация штрих-кода EAN-13 -->
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+<!-- Отрисовка QR-кода (для повторного вывода считанного кода рядом со штрих-кодом) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root{
+    --bg: #14171a;
+    --panel: #1c2024;
+    --panel-2: #22262b;
+    --border: #2b3036;
+    --text: #e9ecef;
+    --muted: #8b9299;
+    --amber: #ffb020;
+    --laser: #ff4438;
+    --green: #3ddc84;
+    --mono: 'JetBrains Mono', ui-monospace, monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; min-height:100vh; background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(255,176,32,0.06), transparent 60%),
+      var(--bg);
+    color:var(--text); font-family:var(--sans);
+    display:flex; justify-content:center; padding: 32px 16px 64px;
+  }
+  .app { width:100%; max-width: 920px; }
+
+  header.top { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:28px; flex-wrap:wrap; gap:8px;}
+  header.top .brand { display:flex; align-items:center; gap:12px; }
+  header.top .mark {
+    width:38px; height:38px; border-radius:8px; background: linear-gradient(135deg, var(--amber), #d97706);
+    display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-weight:700; color:#151515; font-size:14px;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08) inset;
+  }
+  header.top h1 { font-size: 18px; margin:0; letter-spacing:0.2px; font-weight:600; }
+  header.top .sub { color:var(--muted); font-size:12.5px; font-family:var(--mono); }
+
+  .panel {
+    background: var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:20px; margin-bottom:20px; position:relative; overflow:hidden;
+  }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:1.2px; color:var(--muted); margin:0 0 14px; font-weight:600; }
+
+  .controls { display:flex; flex-wrap:wrap; gap:10px; }
+  button {
+    font-family:var(--sans); font-weight:600; font-size:13.5px; border-radius:9px; border:1px solid var(--border);
+    padding:10px 16px; cursor:pointer; background:var(--panel-2); color:var(--text); transition: all .15s ease;
+    display:inline-flex; align-items:center; gap:8px;
+  }
+  button:hover { border-color:#3a4048; transform: translateY(-1px); }
+  button:active { transform: translateY(0); }
+  button.primary { background: linear-gradient(180deg, var(--amber), #e29b0e); color:#181300; border-color:transparent; }
+  button.primary.active { background: linear-gradient(180deg, var(--laser), #c2251b); color:#fff; }
+  button.ghost { background:transparent; }
+  button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+
+  .field-row { display:flex; gap:10px; margin-top:14px; flex-wrap:wrap; }
+  .field-row input[type=text] {
+    flex:1; min-width:220px; background:#0f1113; border:1px solid var(--border); color:var(--text);
+    font-family:var(--mono); font-size:15px; letter-spacing:1px; border-radius:9px; padding:11px 14px;
+  }
+  .field-row input[type=text]:focus { outline:2px solid var(--amber); outline-offset:1px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; font-family:var(--mono); }
+
+  #readerWrap { display:none; margin-top:16px; border-radius:10px; overflow:hidden; border:1px solid var(--border); position:relative; }
+  #readerWrap.show { display:block; }
+  #reader { width:100%; }
+  #reader video { width:100% !important; height:auto !important; object-fit:cover; border-radius:0; display:block; }
+  #reader img { display:none; } /* скрываем иконку камеры-заглушки, которую библиотека показывает до старта потока */
+  #switchCamBtn { background: rgba(20,23,26,0.72); backdrop-filter: blur(2px); border-color: rgba(255,255,255,0.25); color:#fff; }
+  .scanline {
+    position:absolute; left:0; right:0; height:2px; background: linear-gradient(90deg, transparent, var(--laser), transparent);
+    top:0; box-shadow: 0 0 12px 2px var(--laser); animation: sweep 2.1s linear infinite;
+  }
+  @keyframes sweep { 0%{ top:2%; } 50%{ top:96%; } 100%{ top:2%; } }
+
+  .error-box {
+    display:none; background: rgba(255,68,56,0.08); border:1px solid rgba(255,68,56,0.35);
+    color:#ff9d95; padding:12px 14px; border-radius:9px; font-size:13px; margin-top:14px; font-family:var(--mono);
+  }
+  .error-box.show { display:block; }
+
+  .result-grid { display:none; grid-template-columns: 1fr auto 1fr; gap:18px; align-items:center; margin-top:6px; }
+  .result-grid.show { display:grid; }
+  .result-card {
+    background:#0f1113; border:1px solid var(--border); border-radius:12px; padding:18px; text-align:center;
+  }
+  .result-card .label { font-size:11px; text-transform:uppercase; letter-spacing:1.2px; color:var(--muted); margin-bottom:12px; font-weight:600; }
+  .result-card .surface { background:#fff; border-radius:8px; padding:12px; display:flex; align-items:center; justify-content:center; min-height:120px; }
+  .result-card .value { margin-top:10px; font-family:var(--mono); font-size:13px; color:var(--muted); word-break:break-all; }
+  .arrow { color:var(--amber); font-size:22px; font-family:var(--mono); }
+
+  @media (max-width: 640px) {
+    .result-grid { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); justify-self:center; }
+  }
+
+  /* Модальное окно истории */
+  .modal-backdrop {
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); backdrop-filter: blur(2px);
+    align-items:flex-start; justify-content:center; padding: 6vh 16px; z-index:50;
+  }
+  .modal-backdrop.show { display:flex; }
+  .modal {
+    background:var(--panel); border:1px solid var(--border); border-radius:14px; width:100%; max-width:560px;
+    max-height:80vh; display:flex; flex-direction:column;
+  }
+  .modal-head { display:flex; justify-content:space-between; align-items:center; padding:16px 18px; border-bottom:1px solid var(--border); }
+  .modal-head h3 { margin:0; font-size:14px; }
+  .modal-body { padding:8px 10px; overflow-y:auto; }
+  .history-item {
+    padding:12px 12px; border-radius:10px; cursor:pointer; display:flex; justify-content:space-between; gap:10px; align-items:center;
+  }
+  .history-item:hover { background: var(--panel-2); }
+  .history-item .hi-num { font-family:var(--mono); font-size:14px; }
+  .history-item .hi-time { font-size:11px; color:var(--muted); font-family:var(--mono); white-space:nowrap; }
+  .empty-history { color:var(--muted); font-size:13px; padding:24px 12px; text-align:center; font-family:var(--mono); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="brand">
+      <div class="mark">13</div>
+      <div>
+        <h1>QR → EAN-13</h1>
+      </div>
+    </div>
+    <div class="sub">камера · декодирование · штрих-код</div>
+  </header>
+
+  <!-- Панель управления -->
+  <section class="panel">
+    <h2>Сканирование</h2>
+    <div class="controls">
+      <button id="scanBtn" class="primary" type="button">▣ Сканировать QR-код</button>
+      <button id="historyBtn" type="button">🕘 История</button>
+      <button id="clearBtn" class="ghost" type="button">✕ Очистить</button>
+    </div>
+
+    <div class="field-row">
+      <input id="numberInput" type="text" inputmode="numeric" placeholder="Последовательность цифр для EAN-13 (12 или 13 цифр)" />
+      <button id="genBtn" type="button">Сгенерировать</button>
+    </div>
+    <div class="hint">Ожидаемый формат QR-кода: &lt;данные&gt;;&lt;последовательность цифр&gt;;&lt;данные&gt;;&lt;данные&gt;;&lt;данные&gt;</div>
+
+    <div id="readerWrap">
+      <div id="reader"></div>
+      <div class="scanline" id="scanline" style="display:none;"></div>
+      <button id="switchCamBtn" type="button" class="ghost" style="display:none; position:absolute; bottom:10px; right:10px; z-index:5;">🔄 Сменить камеру</button>
+    </div>
+
+    <div class="error-box" id="errorBox"></div>
+  </section>
+
+  <!-- Результат -->
+  <section class="panel">
+    <h2>Результат</h2>
+    <div class="result-grid" id="resultGrid">
+      <div class="result-card">
+        <div class="label">QR-код</div>
+        <div class="surface" id="qrSurface"></div>
+        <div class="value" id="qrValue"></div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="result-card">
+        <div class="label">Штрих-код EAN-13</div>
+        <div class="surface" id="barcodeSurface"><svg id="barcodeSvg"></svg></div>
+        <div class="value" id="barcodeValue"></div>
+      </div>
+    </div>
+    <div id="emptyState" style="color:var(--muted); font-size:13px; font-family:var(--mono); padding: 10px 2px;">
+      Ещё ничего не отсканировано.
+    </div>
+  </section>
+
+</div>
+
+<!-- Модальное окно истории -->
+<div class="modal-backdrop" id="historyModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>История сканирований</h3>
+      <button id="closeHistoryBtn" class="ghost" type="button">✕</button>
+    </div>
+    <div class="modal-body" id="historyBody">
+      <div class="empty-history">История пуста</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Состояние ----------
+  var scanHistory = [];          // { time, raw, number }
+  var html5Qr = null;
+  var scanning = false;
+  var cameraList = [];       // список камер устройства { id, label }
+  var currentCameraIdx = -1; // индекс текущей используемой камеры в cameraList
+
+  // ---------- Элементы ----------
+  var scanBtn = document.getElementById('scanBtn');
+  var historyBtn = document.getElementById('historyBtn');
+  var clearBtn = document.getElementById('clearBtn');
+  var genBtn = document.getElementById('genBtn');
+  var numberInput = document.getElementById('numberInput');
+  var readerWrap = document.getElementById('readerWrap');
+  var scanline = document.getElementById('scanline');
+  var switchCamBtn = document.getElementById('switchCamBtn');
+  var errorBox = document.getElementById('errorBox');
+  var resultGrid = document.getElementById('resultGrid');
+  var emptyState = document.getElementById('emptyState');
+  var qrSurface = document.getElementById('qrSurface');
+  var qrValue = document.getElementById('qrValue');
+  var barcodeValue = document.getElementById('barcodeValue');
+  var historyModal = document.getElementById('historyModal');
+  var historyBody = document.getElementById('historyBody');
+  var closeHistoryBtn = document.getElementById('closeHistoryBtn');
+
+  // ---------- Утилиты ----------
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.classList.add('show');
+  }
+  function clearError() {
+    errorBox.textContent = '';
+    errorBox.classList.remove('show');
+  }
+  function showResult(show) {
+    resultGrid.classList.toggle('show', show);
+    emptyState.style.display = show ? 'none' : 'block';
+  }
+
+  // Извлекает последовательность цифр из строки формата
+  // <данные>;<число>;<данные>;<данные>;<данные>
+  function extractNumberSequence(raw) {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw new Error('Пустая или нечитаемая строка из QR-кода.');
+    }
+    var parts = raw.split(';');
+    if (parts.length !== 5) {
+      throw new Error('Неверный формат строки: ожидалось 5 полей, разделённых «;», получено ' + parts.length + '.');
+    }
+    var seq = parts[1].trim();
+    if (!/^\d+$/.test(seq)) {
+      throw new Error('Второе поле должно содержать только цифры. Получено: «' + parts[1] + '».');
+    }
+    return seq;
+  }
+
+  // Приводит последовательность цифр к валидному коду EAN-13.
+  // Всегда берём 12 значащих цифр и позволяем JsBarcode самостоятельно
+  // рассчитать 13-ю (контрольную) цифру — это исключает ошибки несовпадения
+  // контрольной суммы, если во входных данных было 13 цифр с неверной суммой.
+  function normalizeForEan13(seq) {
+    if (!/^\d+$/.test(seq)) {
+      throw new Error('Штрих-код может содержать только цифры.');
+    }
+    if (seq.length < 12) {
+      return seq.padStart(12, '0'); // дополняем нулями слева до 12 цифр
+    }
+    return seq.slice(0, 12); // берём первые 12 значащих цифр, 13-ю посчитает библиотека
+  }
+
+  function renderQr(text) {
+    qrSurface.innerHTML = '';
+    // eslint-disable-next-line no-undef
+    new QRCode(qrSurface, {
+      text: text,
+      width: 148,
+      height: 148,
+      correctLevel: QRCode.CorrectLevel.M
+    });
+    qrValue.textContent = text.length > 60 ? text.slice(0, 57) + '…' : text;
+  }
+
+  function renderBarcode(seq) {
+    var normalized = normalizeForEan13(seq);
+    var svg = document.getElementById('barcodeSvg');
+    svg.innerHTML = '';
+    // eslint-disable-next-line no-undef
+    JsBarcode(svg, normalized, {
+      format: 'EAN13',
+      lineColor: '#0f1113',
+      width: 2,
+      height: 90,
+      fontSize: 14,
+      margin: 6
+    });
+    barcodeValue.textContent = normalized;
+    return normalized;
+  }
+
+  function addToHistory(rawText, numberSeq) {
+    scanHistory.unshift({
+      time: new Date(),
+      raw: rawText,
+      number: numberSeq
+    });
+    if (scanHistory.length > 50) scanHistory.pop();
+  }
+
+  function processDecodedText(rawText) {
+    clearError();
+    try {
+      var seq = extractNumberSequence(rawText);
+      numberInput.value = seq;
+      var normalized = renderBarcode(seq);
+      renderQr(rawText);
+      showResult(true);
+      addToHistory(rawText, normalized);
+    } catch (e) {
+      showResult(false);
+      showError(e.message || 'Не удалось обработать данные из QR-кода.');
+    }
+  }
+
+  // Ручная генерация из поля ввода (без QR, просто по цифрам)
+  function processManualNumber() {
+    clearError();
+    var raw = numberInput.value.trim();
+    if (raw === '') {
+      showError('Введите последовательность цифр для штрих-кода.');
+      return;
+    }
+    try {
+      var normalized = renderBarcode(raw);
+      renderQr(raw); // при ручном вводе QR строится из самой последовательности
+      showResult(true);
+      addToHistory('(ручной ввод);' + raw + ';;;', normalized);
+    } catch (e) {
+      showResult(false);
+      showError(e.message || 'Не удалось сгенерировать штрих-код. Проверьте введённые цифры.');
+    }
+  }
+
+  // ---------- Сканирование через камеру ----------
+  function stopScanning() {
+    scanning = false;
+    scanBtn.textContent = '▣ Сканировать QR-код';
+    scanBtn.classList.remove('active');
+    scanline.style.display = 'none';
+    readerWrap.classList.remove('show');
+    switchCamBtn.style.display = 'none';
+    if (html5Qr) {
+      html5Qr.stop().then(function () {
+        html5Qr.clear();
+      }).catch(function () {
+        /* сканер уже остановлен — игнорируем */
+      });
+    }
+  }
+
+  function startCameraById(cameraId, onOpened) {
+    var config = { fps: 10, qrbox: { width: 240, height: 240 } };
+    function onSuccess(decodedText) {
+      processDecodedText(decodedText);
+      stopScanning();
+    }
+    function onScanFailure() {
+      // Штатные "QR-код не найден в кадре" — не показываем как ошибку
+    }
+    return html5Qr.start(cameraId, config, onSuccess, onScanFailure).then(function () {
+      if (onOpened) onOpened();
+    });
+  }
+
+  // Переключение на следующую камеру из списка (нужно из-за известного бага
+  // на iOS 17+, когда сканер иногда открывает не ту камеру).
+  function switchToNextCamera() {
+    if (cameraList.length < 2) return;
+    currentCameraIdx = (currentCameraIdx + 1) % cameraList.length;
+    var nextId = cameraList[currentCameraIdx].id;
+    html5Qr.stop().catch(function () {}).then(function () {
+      return startCameraById(nextId);
+    }).catch(function (err) {
+      showError('Не удалось переключить камеру: ' + (err && err.message ? err.message : err));
+    });
+  }
+
+  function startScanning() {
+    clearError();
+    // eslint-disable-next-line no-undef
+    if (typeof Html5Qrcode === 'undefined') {
+      showError('Библиотека сканера не загрузилась. Проверьте подключение к интернету и обновите страницу.');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError('Этот браузер не поддерживает доступ к камере (navigator.mediaDevices недоступен).');
+      return;
+    }
+    // iOS (Safari и Chrome на iOS используют один и тот же WebKit-движок) разрешает
+    // доступ к камере ТОЛЬКО в защищённом контексте: https:// или http://localhost.
+    // Если страница открыта как локальный файл (file://) или по обычному http://,
+    // диалог разрешения на камеру на iPhone не появится вообще — и понять,
+    // в чём дело, будет невозможно без явного сообщения.
+    if (!window.isSecureContext) {
+      showError(
+        'iPhone блокирует доступ к камере на этой странице, потому что она открыта не по HTTPS ' +
+        '(например, как локальный файл или по обычному http). Разместите файл на HTTPS-хостинге ' +
+        '(например, GitHub Pages, Netlify, Vercel) и откройте его по адресу https:// — тогда камера заработает.'
+      );
+      return;
+    }
+
+    readerWrap.classList.add('show');
+    scanline.style.display = 'block';
+    scanBtn.textContent = '■ Остановить сканирование';
+    scanBtn.classList.add('active');
+    scanning = true;
+
+    html5Qr = new Html5Qrcode('reader');
+
+    // ВАЖНО: на iOS 17+ конструкция { facingMode: { exact: 'environment' } } — известный
+    // источник проблем (камера тихо не открывается, без ошибки в консоли). Поэтому вместо
+    // "exact" сначала перечисляем реальные камеры устройства и выбираем тыловую по названию.
+    Html5Qrcode.getCameras()
+      .then(function (cameras) {
+        if (!cameras || cameras.length === 0) {
+          throw new Error('Камера не найдена на этом устройстве.');
+        }
+        cameraList = cameras;
+        var backIdx = cameras.findIndex(function (c) {
+          return /back|rear|environment|задн|тыл/i.test(c.label || '');
+        });
+        currentCameraIdx = backIdx >= 0 ? backIdx : cameras.length - 1;
+        switchCamBtn.style.display = cameras.length > 1 ? 'inline-flex' : 'none';
+        return startCameraById(cameras[currentCameraIdx].id);
+      })
+      .catch(function (err) {
+        // Резервный вариант: если перечисление/запуск по deviceId не сработали,
+        // пробуем мягкое (не "exact") ограничение facingMode — на некоторых версиях
+        // iOS оно срабатывает даже тогда, когда deviceId не срабатывает.
+        var config = { fps: 10, qrbox: { width: 240, height: 240 } };
+        return html5Qr.start({ facingMode: 'environment' }, config, function (decodedText) {
+          processDecodedText(decodedText);
+          stopScanning();
+        }, function () {})
+          .catch(function (err2) {
+            stopScanning();
+            var reason = (err2 && err2.message) || (err && err.message) || String(err2 || err);
+            if (/NotAllowedError|Permission/i.test(reason)) {
+              reason = 'Доступ к камере запрещён. Разрешите камеру для этого сайта в настройках браузера ' +
+                       '(Настройки iOS → Safari/Chrome → Камера, либо значок "aA"/замка в адресной строке) и повторите попытку.';
+            }
+            showError('Не удалось открыть камеру: ' + reason);
+          });
+      });
+  }
+
+  scanBtn.addEventListener('click', function () {
+    if (scanning) {
+      stopScanning();
+    } else {
+      startScanning();
+    }
+  });
+
+  switchCamBtn.addEventListener('click', switchToNextCamera);
+
+
+  // ---------- Прочие кнопки ----------
+  genBtn.addEventListener('click', processManualNumber);
+  numberInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') processManualNumber();
+  });
+
+  clearBtn.addEventListener('click', function () {
+    numberInput.value = '';
+    clearError();
+    showResult(false);
+    qrSurface.innerHTML = '';
+    qrValue.textContent = '';
+    barcodeValue.textContent = '';
+    var svg = document.getElementById('barcodeSvg');
+    svg.innerHTML = '';
+    if (scanning) stopScanning();
+  });
+
+  function renderHistory() {
+    if (scanHistory.length === 0) {
+      historyBody.innerHTML = '<div class="empty-history">История пуста</div>';
+      return;
+    }
+    var html = '';
+    scanHistory.forEach(function (item, idx) {
+      var timeStr = item.time.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      html += '<div class="history-item" data-idx="' + idx + '">' +
+                '<span class="hi-num">' + item.number + '</span>' +
+                '<span class="hi-time">' + timeStr + '</span>' +
+              '</div>';
+    });
+    historyBody.innerHTML = html;
+
+    Array.prototype.forEach.call(historyBody.querySelectorAll('.history-item'), function (el) {
+      el.addEventListener('click', function () {
+        var idx = parseInt(el.getAttribute('data-idx'), 10);
+        var item = scanHistory[idx];
+        if (!item) return;
+        historyModal.classList.remove('show');
+        numberInput.value = item.number;
+        clearError();
+        try {
+          renderBarcode(item.number);
+          renderQr(item.raw);
+          showResult(true);
+        } catch (e) {
+          showResult(false);
+          showError(e.message || 'Не удалось восстановить запись из истории.');
+        }
+      });
+    });
+  }
+
+  historyBtn.addEventListener('click', function () {
+    renderHistory();
+    historyModal.classList.add('show');
+  });
+  closeHistoryBtn.addEventListener('click', function () {
+    historyModal.classList.remove('show');
+  });
+  historyModal.addEventListener('click', function (e) {
+    if (e.target === historyModal) historyModal.classList.remove('show');
+  });
+
+  // Первичное состояние
+  showResult(false);
+})();
+</script>
+</body>
+</html>
