@@ -253,7 +253,7 @@
     }
     var parts = raw.split(';');
     if (parts.length !== 6) {
-      throw new Error('Неверный формат строки: ожидалось 5 полей, разделённых «;», получено ' + parts.length + '.');
+      throw new Error('!!!Неверный формат строки: ожидалось 5 полей, разделённых «;», получено ' + parts.length + '.');
     }
     var seq = parts[1].trim();
     if (!/^\d+$/.test(seq)) {
