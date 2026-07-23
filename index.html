@@ -428,7 +428,7 @@
       // Штатные "QR-код не найден в кадре" — не показываем как ошибку
     }
     return html5Qr.start(cameraId, config, onSuccess, onScanFailure).then(function () {
-      scheduleAutoSwitch(); // с новым объективом даём ещё AUTO_SWITCH_DELAY_MS на попытку поймать код
+     // scheduleAutoSwitch(); // с новым объективом даём ещё AUTO_SWITCH_DELAY_MS на попытку поймать код
       if (onOpened) onOpened();
     });
   }
