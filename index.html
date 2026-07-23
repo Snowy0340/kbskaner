@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>QR → EAN-13 · Сканер конвертации</title>
+<title>QR → Штрих-код · Сканер конвертации</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <!-- QR-сканирование через камеру -->
@@ -51,6 +51,7 @@
     padding:20px; margin-bottom:20px; position:relative; overflow:hidden;
   }
   .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:1.2px; color:var(--muted); margin:0 0 14px; font-weight:600; }
+  .divider { height:1px; background:var(--border); margin:20px 0; }
 
   .controls { display:flex; flex-wrap:wrap; gap:10px; }
   button {
@@ -133,28 +134,22 @@
 
   <header class="top">
     <div class="brand">
-      <div class="mark">13</div>
+      <div class="mark">|||</div>
       <div>
-        <h1>QR → EAN-13</h1>
+        <h1>QR → Штрих-код</h1>
       </div>
     </div>
     <div class="sub">камера · декодирование · штрих-код</div>
   </header>
 
-  <!-- Панель управления -->
+  <!-- Сканер и результат в одной панели: кнопка сканирования и вывод — рядом, без прокрутки -->
   <section class="panel">
-    <h2>Сканирование</h2>
+    <h2>Сканер</h2>
     <div class="controls">
       <button id="scanBtn" class="primary" type="button">▣ Сканировать QR-код</button>
       <button id="historyBtn" type="button">🕘 История</button>
       <button id="clearBtn" class="ghost" type="button">✕ Очистить</button>
     </div>
-
-    <div class="field-row">
-      <input id="numberInput" type="text" inputmode="numeric" placeholder="Последовательность цифр для EAN-13 (12 или 13 цифр)" />
-      <button id="genBtn" type="button">Сгенерировать</button>
-    </div>
-    <div class="hint">Ожидаемый формат QR-кода: &lt;данные&gt;;&lt;последовательность цифр&gt;;&lt;данные&gt;;&lt;данные&gt;;&lt;данные&gt;</div>
 
     <div id="readerWrap">
       <div id="reader"></div>
@@ -163,12 +158,8 @@
     </div>
 
     <div class="error-box" id="errorBox"></div>
-  </section>
 
-  <!-- Результат -->
-  <section class="panel">
-    <h2>Результат</h2>
-    <div class="result-grid" id="resultGrid">
+    <div class="result-grid" id="resultGrid" style="margin-top:16px;">
       <div class="result-card">
         <div class="label">QR-код</div>
         <div class="surface" id="qrSurface"></div>
@@ -176,7 +167,7 @@
       </div>
       <div class="arrow">→</div>
       <div class="result-card">
-        <div class="label">Штрих-код EAN-13</div>
+        <div class="label" id="barcodeLabel">Штрих-код</div>
         <div class="surface" id="barcodeSurface"><svg id="barcodeSvg"></svg></div>
         <div class="value" id="barcodeValue"></div>
       </div>
@@ -184,9 +175,17 @@
     <div id="emptyState" style="color:var(--muted); font-size:13px; font-family:var(--mono); padding: 10px 2px;">
       Ещё ничего не отсканировано.
     </div>
+
+    <div class="divider"></div>
+
+    <div class="field-row">
+      <input id="numberInput" type="text" inputmode="numeric" placeholder="Или введите последовательность цифр вручную" />
+      <button id="genBtn" type="button">Сгенерировать</button>
+    </div>
   </section>
 
 </div>
+
 
 <!-- Модальное окно истории -->
 <div class="modal-backdrop" id="historyModal">
@@ -210,7 +209,8 @@
   var html5Qr = null;
   var scanning = false;
   var cameraList = [];       // список камер устройства { id, label }
-  var currentCameraIdx = -1; // индекс текущей используемой камеры в cameraList
+  var autoSwitchTimer = null;      // таймер автопереключения объектива
+  var AUTO_SWITCH_DELAY_MS = 3500; // если QR не поймался за это время — пробуем другой объектив
 
   // ---------- Элементы ----------
   var scanBtn = document.getElementById('scanBtn');
@@ -227,6 +227,7 @@
   var qrSurface = document.getElementById('qrSurface');
   var qrValue = document.getElementById('qrValue');
   var barcodeValue = document.getElementById('barcodeValue');
+  var barcodeLabel = document.getElementById('barcodeLabel');
   var historyModal = document.getElementById('historyModal');
   var historyBody = document.getElementById('historyBody');
   var closeHistoryBtn = document.getElementById('closeHistoryBtn');
@@ -246,14 +247,15 @@
   }
 
   // Извлекает последовательность цифр из строки формата
-  // <данные>;<число>;<данные>;<данные>;<данные>
+  // <данные>;<число>;<данные>;... — берём ИМЕННО второе поле,
+  // независимо от того, сколько всего полей в строке.
   function extractNumberSequence(raw) {
     if (typeof raw !== 'string' || raw.trim() === '') {
       throw new Error('Пустая или нечитаемая строка из QR-кода.');
     }
     var parts = raw.split(';');
-    if (parts.length !== 6) {
-      throw new Error('!!!Неверный формат строки: ожидалось 5 полей, разделённых «;», получено ' + parts.length + '.');
+    if (parts.length < 2) {
+      throw new Error('Неверный формат строки: нужно минимум 2 поля, разделённых «;», получено ' + parts.length + '.');
     }
     var seq = parts[1].trim();
     if (!/^\d+$/.test(seq)) {
@@ -262,18 +264,40 @@
     return seq;
   }
 
-  // Приводит последовательность цифр к валидному коду EAN-13.
-  // Всегда берём 12 значащих цифр и позволяем JsBarcode самостоятельно
-  // рассчитать 13-ю (контрольную) цифру — это исключает ошибки несовпадения
-  // контрольной суммы, если во входных данных было 13 цифр с неверной суммой.
-  function normalizeForEan13(seq) {
+  // Подбирает формат штрих-кода в зависимости от количества цифр в последовательности.
+  // Для стандартных розничных форматов (EAN-8, UPC-A, EAN-13, ITF-14) мы всегда берём
+  // нужное количество ЗНАЧАЩИХ цифр и даём библиотеке самой посчитать контрольную цифру —
+  // это исключает ошибки несовпадения контрольной суммы. Для длин, которые не подходят
+  // ни под один розничный стандарт, используется универсальный CODE128 (кодирует любые цифры).
+  function pickBarcodeFormat(seq) {
     if (!/^\d+$/.test(seq)) {
       throw new Error('Штрих-код может содержать только цифры.');
     }
-    if (seq.length < 12) {
-      return seq.padStart(12, '0'); // дополняем нулями слева до 12 цифр
+    var n = seq.length;
+
+    if (n >= 7 && n <= 8) {
+      // EAN-8: 7 значащих цифр + 1 контрольная
+      var v8 = n < 7 ? seq.padStart(7, '0') : seq.slice(0, 7);
+      return { format: 'EAN8', label: 'EAN-8', value: v8 };
     }
-    return seq.slice(0, 12); // берём первые 12 значащих цифр, 13-ю посчитает библиотека
+    if (n >= 9 && n <= 11) {
+      // UPC-A: 11 значащих цифр + 1 контрольная
+      var v11 = seq.padStart(11, '0').slice(-11);
+      return { format: 'UPC', label: 'UPC-A', value: v11 };
+    }
+    if (n >= 12 && n <= 13) {
+      // EAN-13: 12 значащих цифр + 1 контрольная
+      var v12 = n < 12 ? seq.padStart(12, '0') : seq.slice(0, 12);
+      return { format: 'EAN13', label: 'EAN-13', value: v12 };
+    }
+    if (n >= 14 && n <= 16) {
+      // ITF-14 (код транспортной упаковки): 13 значащих цифр + 1 контрольная
+      var v13 = n < 13 ? seq.padStart(13, '0') : seq.slice(0, 13);
+      return { format: 'ITF14', label: 'ITF-14', value: v13 };
+    }
+    // Слишком короткая (1–6 цифр) или слишком длинная (17+ цифр) последовательность —
+    // ни один розничный стандарт не подходит, используем универсальный CODE128.
+    return { format: 'CODE128', label: 'CODE128', value: seq };
   }
 
   function renderQr(text) {
@@ -289,20 +313,21 @@
   }
 
   function renderBarcode(seq) {
-    var normalized = normalizeForEan13(seq);
+    var picked = pickBarcodeFormat(seq);
     var svg = document.getElementById('barcodeSvg');
     svg.innerHTML = '';
     // eslint-disable-next-line no-undef
-    JsBarcode(svg, normalized, {
-      format: 'EAN13',
+    JsBarcode(svg, picked.value, {
+      format: picked.format,
       lineColor: '#0f1113',
       width: 2,
       height: 90,
       fontSize: 14,
       margin: 6
     });
-    barcodeValue.textContent = normalized;
-    return normalized;
+    barcodeLabel.textContent = 'Штрих-код (' + picked.label + ')';
+    barcodeValue.textContent = picked.value;
+    return picked.value;
   }
 
   function addToHistory(rawText, numberSeq) {
@@ -323,6 +348,11 @@
       renderQr(rawText);
       showResult(true);
       addToHistory(rawText, normalized);
+      // Небольшая задержка, чтобы сначала закрылось окно камеры (stopScanning вызывается
+      // сразу после этой функции), а потом страница плавно прокрутилась к результату.
+      setTimeout(function () {
+        resultGrid.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 150);
     } catch (e) {
       showResult(false);
       showError(e.message || 'Не удалось обработать данные из QR-кода.');
@@ -349,6 +379,28 @@
   }
 
   // ---------- Сканирование через камеру ----------
+  var scanOrder = [];      // камеры, упорядоченные: обычная тыловая → сверхширокоугольная → остальные
+  var scanOrderIdx = 0;    // текущая позиция в scanOrder
+
+  function clearAutoSwitch() {
+    if (autoSwitchTimer) {
+      clearTimeout(autoSwitchTimer);
+      autoSwitchTimer = null;
+    }
+  }
+
+  // Если за AUTO_SWITCH_DELAY_MS не удалось поймать QR-код, автоматически пробуем
+  // следующий объектив. Это решает проблему, когда QR-код поднесён близко к камере:
+  // основной тыловой объектив не может на него сфокусироваться, а сверхширокоугольный —
+  // может (у него меньше минимальная дистанция фокусировки).
+  function scheduleAutoSwitch() {
+    clearAutoSwitch();
+    if (scanOrder.length < 2) return;
+    autoSwitchTimer = setTimeout(function () {
+      if (scanning) switchToNextCamera(true);
+    }, AUTO_SWITCH_DELAY_MS);
+  }
+
   function stopScanning() {
     scanning = false;
     scanBtn.textContent = '▣ Сканировать QR-код';
@@ -356,6 +408,7 @@
     scanline.style.display = 'none';
     readerWrap.classList.remove('show');
     switchCamBtn.style.display = 'none';
+    clearAutoSwitch();
     if (html5Qr) {
       html5Qr.stop().then(function () {
         html5Qr.clear();
@@ -375,20 +428,23 @@
       // Штатные "QR-код не найден в кадре" — не показываем как ошибку
     }
     return html5Qr.start(cameraId, config, onSuccess, onScanFailure).then(function () {
+      scheduleAutoSwitch(); // с новым объективом даём ещё AUTO_SWITCH_DELAY_MS на попытку поймать код
       if (onOpened) onOpened();
     });
   }
 
-  // Переключение на следующую камеру из списка (нужно из-за известного бага
-  // на iOS 17+, когда сканер иногда открывает не ту камеру).
-  function switchToNextCamera() {
-    if (cameraList.length < 2) return;
-    currentCameraIdx = (currentCameraIdx + 1) % cameraList.length;
-    var nextId = cameraList[currentCameraIdx].id;
+  // Переключение на следующий объектив по кругу (по кнопке пользователем или автоматически,
+  // когда код не удаётся поймать в фокус — актуально для iOS 17+, где может открыться не тот объектив).
+  function switchToNextCamera(isAuto) {
+    if (scanOrder.length < 2) return;
+    scanOrderIdx = (scanOrderIdx + 1) % scanOrder.length;
+    var nextId = scanOrder[scanOrderIdx].id;
     html5Qr.stop().catch(function () {}).then(function () {
       return startCameraById(nextId);
     }).catch(function (err) {
-      showError('Не удалось переключить камеру: ' + (err && err.message ? err.message : err));
+      if (!isAuto) {
+        showError('Не удалось переключить камеру: ' + (err && err.message ? err.message : err));
+      }
     });
   }
 
@@ -434,12 +490,22 @@
           throw new Error('Камера не найдена на этом устройстве.');
         }
         cameraList = cameras;
-        var backIdx = cameras.findIndex(function (c) {
-          return /back|rear|environment|задн|тыл/i.test(c.label || '');
-        });
-        currentCameraIdx = backIdx >= 0 ? backIdx : cameras.length - 1;
-        switchCamBtn.style.display = cameras.length > 1 ? 'inline-flex' : 'none';
-        return startCameraById(cameras[currentCameraIdx].id);
+
+        // Делим камеры на: сверхширокоугольную/макро (лучше для близких QR-кодов),
+        // обычную тыловую и всё остальное. Порядок сканирования: обычная тыловая
+        // (лучшее качество для типичной дистанции) → сверхширокоугольная (для close-up) → остальные.
+        var wideAngleRe = /ultra ?wide|ultra-wide|0\.5x|macro|широк/i;
+        var backRe = /back|rear|environment|задн|тыл/i;
+        var ultraWide = cameras.filter(function (c) { return wideAngleRe.test(c.label || ''); });
+        var mainBack = cameras.filter(function (c) { return backRe.test(c.label || '') && !wideAngleRe.test(c.label || ''); });
+        var others = cameras.filter(function (c) { return ultraWide.indexOf(c) === -1 && mainBack.indexOf(c) === -1; });
+
+        scanOrder = mainBack.concat(ultraWide, others);
+        if (scanOrder.length === 0) scanOrder = cameras.slice();
+        scanOrderIdx = 0;
+
+        switchCamBtn.style.display = scanOrder.length > 1 ? 'inline-flex' : 'none';
+        return startCameraById(scanOrder[scanOrderIdx].id);
       })
       .catch(function (err) {
         // Резервный вариант: если перечисление/запуск по deviceId не сработали,
@@ -470,7 +536,9 @@
     }
   });
 
-  switchCamBtn.addEventListener('click', switchToNextCamera);
+  switchCamBtn.addEventListener('click', function () {
+    switchToNextCamera(false);
+  });
 
 
   // ---------- Прочие кнопки ----------
@@ -486,6 +554,7 @@
     qrSurface.innerHTML = '';
     qrValue.textContent = '';
     barcodeValue.textContent = '';
+    barcodeLabel.textContent = 'Штрих-код';
     var svg = document.getElementById('barcodeSvg');
     svg.innerHTML = '';
     if (scanning) stopScanning();
