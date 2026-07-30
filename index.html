@@ -381,6 +381,7 @@
   // ---------- Сканирование через камеру ----------
   var scanOrder = [];      // камеры, упорядоченные: обычная тыловая → сверхширокоугольная → остальные
   var scanOrderIdx = 0;    // текущая позиция в scanOrder
+  var pendingStop = Promise.resolve(); // разрешается, когда предыдущая сессия камеры полностью закрыта
 
   function clearAutoSwitch() {
     if (autoSwitchTimer) {
@@ -410,16 +411,26 @@
     switchCamBtn.style.display = 'none';
     clearAutoSwitch();
     if (html5Qr) {
-      html5Qr.stop().then(function () {
-        html5Qr.clear();
+      var qr = html5Qr;
+      // Запоминаем момент, когда камера точно освободится — новая сессия
+      // не должна стартовать, пока эта не закрылась полностью (иначе на
+      // iOS Safari возможен сбой/перезапуск страницы из-за двух активных
+      // потоков камеры одновременно).
+      pendingStop = qr.stop().then(function () {
+        qr.clear();
       }).catch(function () {
         /* сканер уже остановлен — игнорируем */
       });
+    } else {
+      pendingStop = Promise.resolve();
     }
   }
 
   function startCameraById(cameraId, onOpened) {
-    var config = { fps: 10, qrbox: { width: 240, height: 240 } };
+    // Без фиксированного qrbox: сканируется весь кадр целиком, а не только
+    // центральный квадрат — так QR-код ловится в любом месте кадра и любого
+    // размера, даже если он намного меньше или больше прежнего окошка захвата.
+    var config = { fps: 10 };
     function onSuccess(decodedText) {
       processDecodedText(decodedText);
       stopScanning();
@@ -428,7 +439,7 @@
       // Штатные "QR-код не найден в кадре" — не показываем как ошибку
     }
     return html5Qr.start(cameraId, config, onSuccess, onScanFailure).then(function () {
-     // scheduleAutoSwitch(); // с новым объективом даём ещё AUTO_SWITCH_DELAY_MS на попытку поймать код
+      scheduleAutoSwitch(); // с новым объективом даём ещё AUTO_SWITCH_DELAY_MS на попытку поймать код
       if (onOpened) onOpened();
     });
   }
@@ -446,6 +457,65 @@
         showError('Не удалось переключить камеру: ' + (err && err.message ? err.message : err));
       }
     });
+  }
+
+  function acquireCameraAndStart() {
+    html5Qr = new Html5Qrcode('reader');
+
+    // ВАЖНО: на iOS 17+ конструкция { facingMode: { exact: 'environment' } } — известный
+    // источник проблем (камера тихо не открывается, без ошибки в консоли). Поэтому вместо
+    // "exact" сначала перечисляем реальные камеры устройства и выбираем тыловую по названию.
+    Html5Qrcode.getCameras()
+      .then(function (cameras) {
+        if (!cameras || cameras.length === 0) {
+          throw new Error('Камера не найдена на этом устройстве.');
+        }
+        cameraList = cameras;
+
+        // Полностью исключаем фронтальную камеру из цепочки переключения —
+        // для сканирования QR-кода она бесполезна. Если единственная доступная
+        // камера на устройстве — фронтальная (например, некоторые ноутбуки),
+        // используем её как единственный доступный вариант.
+        var frontRe = /front|face|user|фронт|передн/i;
+        var nonFront = cameras.filter(function (c) { return !frontRe.test(c.label || ''); });
+        var pool = nonFront.length > 0 ? nonFront : cameras;
+
+        // Делим оставшиеся камеры на: сверхширокоугольную/макро (лучше для близких
+        // QR-кодов), обычную тыловую и всё остальное. Порядок сканирования: обычная
+        // тыловая (лучшее качество для типичной дистанции) → сверхширокоугольная
+        // (для close-up) → остальные.
+        var wideAngleRe = /ultra ?wide|ultra-wide|0\.5x|macro|широк/i;
+        var backRe = /back|rear|environment|задн|тыл/i;
+        var ultraWide = pool.filter(function (c) { return wideAngleRe.test(c.label || ''); });
+        var mainBack = pool.filter(function (c) { return backRe.test(c.label || '') && !wideAngleRe.test(c.label || ''); });
+        var others = pool.filter(function (c) { return ultraWide.indexOf(c) === -1 && mainBack.indexOf(c) === -1; });
+
+        scanOrder = mainBack.concat(ultraWide, others);
+        if (scanOrder.length === 0) scanOrder = pool.slice();
+        scanOrderIdx = 0;
+
+        switchCamBtn.style.display = scanOrder.length > 1 ? 'inline-flex' : 'none';
+        return startCameraById(scanOrder[scanOrderIdx].id);
+      })
+      .catch(function (err) {
+        // Резервный вариант: если перечисление/запуск по deviceId не сработали,
+        // пробуем мягкое (не "exact") ограничение facingMode — на некоторых версиях
+        // iOS оно срабатывает даже тогда, когда deviceId не срабатывает.
+        var config = { fps: 10 };
+        return html5Qr.start({ facingMode: 'environment' }, config, function (decodedText) {
+          processDecodedText(decodedText);
+          stopScanning();
+        }, function () {})
+          .catch(function (err2) {
+            stopScanning();
+            var reason = (err2 && err2.message) || (err && err.message) || String(err2 || err);
+            if (/NotAllowedError|Permission/i.test(reason)) {
+              reason = 'Доступ к камере запрещён. Разрешите камеру для этого сайта в настройках браузера ' +
+                       '(Настройки iOS → Safari/Chrome → Камера, либо значок "aA"/замка в адресной строке) и повторите попытку.';
+            }
+            showError('Не удалось открыть камеру: ' + reason);
+          });
+      });
   }
 
   function startScanning() {
@@ -479,53 +549,14 @@
     scanBtn.classList.add('active');
     scanning = true;
 
-    html5Qr = new Html5Qrcode('reader');
-
-    // ВАЖНО: на iOS 17+ конструкция { facingMode: { exact: 'environment' } } — известный
-    // источник проблем (камера тихо не открывается, без ошибки в консоли). Поэтому вместо
-    // "exact" сначала перечисляем реальные камеры устройства и выбираем тыловую по названию.
-    Html5Qrcode.getCameras()
-      .then(function (cameras) {
-        if (!cameras || cameras.length === 0) {
-          throw new Error('Камера не найдена на этом устройстве.');
-        }
-        cameraList = cameras;
-
-        // Делим камеры на: сверхширокоугольную/макро (лучше для близких QR-кодов),
-        // обычную тыловую и всё остальное. Порядок сканирования: обычная тыловая
-        // (лучшее качество для типичной дистанции) → сверхширокоугольная (для close-up) → остальные.
-        var wideAngleRe = /ultra ?wide|ultra-wide|0\.5x|macro|широк/i;
-        var backRe = /back|rear|environment|задн|тыл/i;
-        var ultraWide = cameras.filter(function (c) { return wideAngleRe.test(c.label || ''); });
-        var mainBack = cameras.filter(function (c) { return backRe.test(c.label || '') && !wideAngleRe.test(c.label || ''); });
-        var others = cameras.filter(function (c) { return ultraWide.indexOf(c) === -1 && mainBack.indexOf(c) === -1; });
-
-        scanOrder = mainBack.concat(ultraWide, others);
-        if (scanOrder.length === 0) scanOrder = cameras.slice();
-        scanOrderIdx = 0;
-
-        switchCamBtn.style.display = scanOrder.length > 1 ? 'inline-flex' : 'none';
-        return startCameraById(scanOrder[scanOrderIdx].id);
-      })
-      .catch(function (err) {
-        // Резервный вариант: если перечисление/запуск по deviceId не сработали,
-        // пробуем мягкое (не "exact") ограничение facingMode — на некоторых версиях
-        // iOS оно срабатывает даже тогда, когда deviceId не срабатывает.
-        var config = { fps: 10, qrbox: { width: 240, height: 240 } };
-        return html5Qr.start({ facingMode: 'environment' }, config, function (decodedText) {
-          processDecodedText(decodedText);
-          stopScanning();
-        }, function () {})
-          .catch(function (err2) {
-            stopScanning();
-            var reason = (err2 && err2.message) || (err && err.message) || String(err2 || err);
-            if (/NotAllowedError|Permission/i.test(reason)) {
-              reason = 'Доступ к камере запрещён. Разрешите камеру для этого сайта в настройках браузера ' +
-                       '(Настройки iOS → Safari/Chrome → Камера, либо значок "aA"/замка в адресной строке) и повторите попытку.';
-            }
-            showError('Не удалось открыть камеру: ' + reason);
-          });
-      });
+    // Ждём, пока полностью закроется предыдущая сессия камеры (если пользователь
+    // только что закончил сканирование и сразу нажал «Сканировать» ещё раз) —
+    // это исключает одновременный запуск двух сессий камеры, из-за которого
+    // страница на iOS Safari могла аварийно перезапуститься.
+    pendingStop.then(function () {
+      if (!scanning) return; // пользователь успел нажать «Остановить» до открытия камеры
+      acquireCameraAndStart();
+    });
   }
 
   scanBtn.addEventListener('click', function () {
